@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -22,11 +23,20 @@ from torch.utils.data import DataLoader
 @dataclass
 class TrainConfig:
     batch_size: int = 16
-    num_epochs: int = 8
-    learning_rate: float = 1e-3
+    num_epochs: int = 12
+    learning_rate: float = 3e-4
     weight_decay: float = 1e-4
     num_workers: int = 0
     random_seed: int = 42
+    label_smoothing: float = 0.05
+    lr_scheduler_patience: int = 2
+    lr_scheduler_factor: float = 0.3
+    early_stopping_patience: int = 4
+    max_grad_norm: float = 1.0
+    image_size: int = 224
+    dropout: float = 0.3
+    use_pretrained: bool = True
+    verbose: bool = True
 
 
 def set_seed(seed: int) -> None:
@@ -34,6 +44,9 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def create_data_loader(dataset, batch_size: int, shuffle: bool, num_workers: int):
@@ -64,6 +77,7 @@ def run_epoch(model, dataloader, criterion, device, optimizer=None):
             if is_training:
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
         total_loss += loss.item() * labels.size(0)
@@ -93,34 +107,79 @@ def train_model(
     train_loader = create_data_loader(train_dataset, config.batch_size, True, config.num_workers)
     val_loader = create_data_loader(val_dataset, config.batch_size, False, config.num_workers)
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(
+    class_counts = Counter(record.label_index for record in train_dataset.records)
+    weights = torch.tensor(
+        [1.0 / max(1, class_counts.get(idx, 0)) for idx in range(len(class_names))],
+        dtype=torch.float32,
+        device=device,
+    )
+    weights = weights / weights.mean()
+
+    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=config.label_smoothing)
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=config.lr_scheduler_factor,
+        patience=config.lr_scheduler_patience,
     )
 
     history = []
     best_state = None
     best_val_accuracy = -1.0
+    best_val_loss = float("inf")
     best_epoch = -1
+    epochs_without_improvement = 0
 
     for epoch in range(1, config.num_epochs + 1):
         train_metrics = run_epoch(model, train_loader, criterion, device, optimizer)
         val_metrics = run_epoch(model, val_loader, criterion, device)
+        scheduler.step(val_metrics["accuracy"])
         epoch_metrics = {
             "epoch": epoch,
             "train_loss": train_metrics["loss"],
             "train_accuracy": train_metrics["accuracy"],
             "val_loss": val_metrics["loss"],
             "val_accuracy": val_metrics["accuracy"],
+            "learning_rate": optimizer.param_groups[0]["lr"],
         }
         history.append(epoch_metrics)
 
-        if val_metrics["accuracy"] > best_val_accuracy:
+        if config.verbose:
+            print(
+                "Epoch "
+                f"{epoch}/{config.num_epochs} "
+                f"- train_loss: {train_metrics['loss']:.4f} "
+                f"- train_acc: {train_metrics['accuracy']:.4f} "
+                f"- val_loss: {val_metrics['loss']:.4f} "
+                f"- val_acc: {val_metrics['accuracy']:.4f} "
+                f"- lr: {optimizer.param_groups[0]['lr']:.2e}"
+            )
+
+        is_better = (
+            val_metrics["accuracy"] > best_val_accuracy
+            or (
+                val_metrics["accuracy"] == best_val_accuracy
+                and val_metrics["loss"] < best_val_loss
+            )
+        )
+        if is_better:
             best_val_accuracy = val_metrics["accuracy"]
+            best_val_loss = val_metrics["loss"]
             best_epoch = epoch
             best_state = copy.deepcopy(model.state_dict())
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        if epochs_without_improvement >= config.early_stopping_patience:
+            if config.verbose:
+                print(f"Early stopping at epoch {epoch}. Best epoch: {best_epoch}")
+            break
 
     if best_state is None:
         raise RuntimeError("Training did not produce a checkpoint.")
@@ -131,8 +190,13 @@ def train_model(
         "model_state_dict": best_state,
         "class_names": class_names,
         "best_val_accuracy": best_val_accuracy,
+        "best_val_loss": best_val_loss,
         "best_epoch": best_epoch,
         "config": asdict(config),
+        "model_kwargs": {
+            "dropout": config.dropout,
+            "pretrained": False,
+        },
     }
     torch.save(checkpoint, output_path / "best_model.pt")
     with (output_path / "history.json").open("w", encoding="utf-8") as handle:
@@ -159,11 +223,12 @@ def evaluate_model(model, dataset, class_names: list[str], batch_size: int, num_
     report = classification_report(
         true_labels,
         pred_labels,
+        labels=list(range(len(class_names))),
         target_names=class_names,
         output_dict=True,
         zero_division=0,
     )
-    matrix = confusion_matrix(true_labels, pred_labels)
+    matrix = confusion_matrix(true_labels, pred_labels, labels=list(range(len(class_names))))
     accuracy = float(np.mean(np.array(true_labels) == np.array(pred_labels)))
 
     return {
@@ -217,4 +282,3 @@ def plot_confusion_matrix(matrix, class_names):
     fig.colorbar(im, ax=ax)
     fig.tight_layout()
     return fig
-

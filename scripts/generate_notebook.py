@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from pathlib import Path
 
 
 def md_cell(text: str) -> dict:
+    normalized = textwrap.dedent(text).strip()
     return {
         "cell_type": "markdown",
         "metadata": {},
-        "source": [line + "\n" for line in text.strip().splitlines()],
+        "source": [line + "\n" for line in normalized.splitlines()],
     }
 
 
 def code_cell(code: str) -> dict:
+    normalized = textwrap.dedent(code).strip()
     return {
         "cell_type": "code",
         "execution_count": None,
         "metadata": {},
         "outputs": [],
-        "source": [line + "\n" for line in code.strip().splitlines()],
+        "source": [line + "\n" for line in normalized.splitlines()],
     }
 
 
@@ -45,10 +48,17 @@ NOTEBOOK = {
         code_cell(
             """
             from pathlib import Path
+            import os
             import sys
 
             PROJECT_ROOT = Path.cwd()
             DEPS_DIR = PROJECT_ROOT / ".deps"
+            CACHE_DIR = PROJECT_ROOT / ".cache"
+            MPLCONFIGDIR = PROJECT_ROOT / ".mplconfig"
+            CACHE_DIR.mkdir(exist_ok=True)
+            MPLCONFIGDIR.mkdir(exist_ok=True)
+            os.environ.setdefault("XDG_CACHE_HOME", str(CACHE_DIR))
+            os.environ.setdefault("MPLCONFIGDIR", str(MPLCONFIGDIR))
             if DEPS_DIR.exists():
                 sys.path.insert(0, str(DEPS_DIR))
 
@@ -119,7 +129,7 @@ NOTEBOOK = {
             """
             ## 4. Configure and Train the Model
 
-            The current implementation uses a small ResNet-18 classifier trained from scratch because the environment should not depend on downloading pretrained weights at runtime.
+            The default configuration now uses transfer learning plus stronger regularization. That usually generalizes much better than training from scratch on a small image dataset.
             """
         ),
         code_cell(
@@ -129,14 +139,25 @@ NOTEBOOK = {
 
             config = TrainConfig(
                 batch_size=16,
-                num_epochs=8,
-                learning_rate=1e-3,
+                num_epochs=12,
+                learning_rate=3e-4,
                 weight_decay=1e-4,
                 num_workers=0,
                 random_seed=42,
+                label_smoothing=0.05,
+                lr_scheduler_patience=2,
+                lr_scheduler_factor=0.3,
+                early_stopping_patience=4,
+                image_size=224,
+                dropout=0.3,
+                use_pretrained=True,
             )
 
-            model = build_model(num_classes=len(class_names), dropout=0.2).to(device)
+            model = build_model(
+                num_classes=len(class_names),
+                dropout=config.dropout,
+                pretrained=config.use_pretrained,
+            ).to(device)
 
             history, checkpoint = train_model(
                 model=model,
@@ -150,6 +171,7 @@ NOTEBOOK = {
 
             print("Best epoch:", checkpoint["best_epoch"])
             print("Best validation accuracy:", round(checkpoint["best_val_accuracy"], 4))
+            print("Best validation loss:", round(checkpoint["best_val_loss"], 4))
             print("Checkpoint saved to:", output_dir / "best_model.pt")
             """
         ),
@@ -204,10 +226,17 @@ NOTEBOOK = {
             checkpoint_path = output_dir / "best_model.pt"
             inference_model, inference_class_names, checkpoint_data = load_checkpoint(checkpoint_path)
             inference_model = inference_model.to(device)
+            image_size = checkpoint_data["config"].get("image_size", 224)
 
             sample_paths = [record.image_path for record in random.sample(test_records, k=min(6, len(test_records)))]
             for path in sample_paths:
-                prediction = predict_image_path(inference_model, inference_class_names, path, device=device)
+                prediction = predict_image_path(
+                    inference_model,
+                    inference_class_names,
+                    path,
+                    device=device,
+                    image_size=image_size,
+                )
                 print(path.name, "->", prediction["label_display"], f"({prediction['confidence'] * 100:.1f}%)")
             """
         ),
@@ -215,13 +244,24 @@ NOTEBOOK = {
             """
             ## 8. Webcam Inference
 
-            Run the next cell after training finishes to open a webcam window. Press `q` in the OpenCV window to exit.
+            Run the next cell after training finishes to render the webcam inline in the notebook. The overlay refuses to make a strong claim when confidence is low. Stop the cell to end the preview.
             """
         ),
         code_cell(
             """
-            # checkpoint_path = PROJECT_ROOT / "outputs" / "resnet18_squat" / "best_model.pt"
-            # run_webcam_inference(checkpoint_path=checkpoint_path, camera_index=0, image_size=224, smoothing_window=5)
+            import importlib
+            import squat_trainer.inference as inference_module
+
+            importlib.reload(inference_module)
+            checkpoint_path = PROJECT_ROOT / "outputs" / "resnet18_squat" / "best_model.pt"
+            inference_module.run_webcam_inference(
+                checkpoint_path=checkpoint_path,
+                camera_index=0,
+                image_size=None,
+                smoothing_window=7,
+                confidence_threshold=0.6,
+                display_mode="notebook",
+            )
             """
         ),
         md_cell(
@@ -231,15 +271,16 @@ NOTEBOOK = {
             - `good` means the frame looks like correct squat posture.
             - `bad_back` means the model sees back-position issues.
             - `bad_heel` means the model sees heel-position issues.
+            - A very high validation score with a much lower test score usually means the random validation split is easier than the real hold-out data. Trust the test set more.
             - If you later collect true video clips with repetition-level labels, the next upgrade should be a temporal model over frame sequences rather than this frame-by-frame classifier.
             """
         ),
     ],
     "metadata": {
         "kernelspec": {
-            "display_name": "Python 3",
+            "display_name": "SquatTrainer (.venv)",
             "language": "python",
-            "name": "python3",
+            "name": "squattrainer-venv",
         },
         "language_info": {
             "name": "python",

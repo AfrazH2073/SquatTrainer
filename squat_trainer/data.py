@@ -18,6 +18,7 @@ from torch.utils.data import Dataset
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
+CLASS_NAMES = ["bad_back", "bad_heel", "good"]
 CLASS_NAME_MAP = {
     "badback": "bad_back",
     "badheel": "bad_heel",
@@ -69,8 +70,7 @@ def scan_split(root_dir: str | Path, split: str) -> list[SampleRecord]:
         raise FileNotFoundError(f"Missing split directory: {split_dir}")
 
     records: list[SampleRecord] = []
-    label_names = sorted({canonicalize_label(path.name) for path in split_dir.iterdir() if path.is_dir()})
-    label_to_index = {label_name: idx for idx, label_name in enumerate(label_names)}
+    label_to_index = {label_name: idx for idx, label_name in enumerate(CLASS_NAMES)}
 
     for class_dir in sorted(path for path in split_dir.iterdir() if path.is_dir()):
         label_name = canonicalize_label(class_dir.name)
@@ -107,10 +107,9 @@ def stratified_train_val_split(
 
 def summarize_records(records: Iterable[SampleRecord]) -> dict[str, int]:
     counts = Counter(record.label_name for record in records)
-    return {DISPLAY_NAMES[label_name]: counts.get(label_name, 0) for label_name in sorted(DISPLAY_NAMES)}
+    return {DISPLAY_NAMES[label_name]: counts.get(label_name, 0) for label_name in CLASS_NAMES}
 
 
 def class_names_from_records(records: list[SampleRecord]) -> list[str]:
-    names = sorted({record.label_name for record in records})
-    return names
-
+    present = {record.label_name for record in records}
+    return [label_name for label_name in CLASS_NAMES if label_name in present]

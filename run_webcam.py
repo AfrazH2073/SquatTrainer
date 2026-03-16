@@ -11,7 +11,13 @@ def main() -> None:
         raise FileNotFoundError(
             f"Missing checkpoint: {checkpoint_path}. Train the model in SquatTrainer.ipynb first."
         )
-    run_webcam_inference(checkpoint_path=checkpoint_path, camera_index=0, image_size=224, smoothing_window=5)
+    run_webcam_inference(
+        checkpoint_path=checkpoint_path,
+        camera_index=0,
+        image_size=None,
+        smoothing_window=7,
+        confidence_threshold=0.6,
+    )
 
 
 if __name__ == "__main__":

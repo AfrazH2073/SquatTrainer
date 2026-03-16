@@ -1,4 +1,7 @@
 .deps/
+.venv/
+.cache/
+.mplconfig/
 outputs/
 __pycache__/
 *.pyc
